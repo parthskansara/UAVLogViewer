@@ -1,53 +1,94 @@
 # UAV Log Viewer
 
-![log seeking](preview.gif "Logo Title Text 1")
+A web application for viewing and analyzing UAV flight logs with an AI-powered chatbot interface.
 
- This is a Javascript based log viewer for Mavlink telemetry and dataflash logs.
- [Live demo here](http://plot.ardupilot.org).
+## Features
 
-## Build Setup
+- Interactive 3D visualization of flight paths
+- Real-time parameter monitoring
+- AI-powered chatbot for data analysis
+- SQL and statistical analysis capabilities
+- Event logging and analysis
 
-``` bash
-# install dependencies
+## Prerequisites
+
+- Node.js (v14 or higher)
+- Python 3.8 or higher
+- npm or yarn package manager
+
+## Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/UAVLogViewer.git
+cd UAVLogViewer
+```
+
+2. Install backend dependencies:
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate  # On Windows, use: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+3. Install frontend dependencies:
+```bash
+cd ../frontend
 npm install
+```
 
-# serve with hot reload at localhost:8080
+## Running the Application
+
+### Backend Server
+
+1. Navigate to the backend directory:
+```bash
+cd backend
+```
+
+2. Activate the virtual environment (if not already activated):
+```bash
+source venv/bin/activate  # On Windows, use: venv\Scripts\activate
+```
+
+3. Start the backend server:
+```bash
+# For production:
+python app.py
+
+# For development with hot reloading:
+uvicorn app:app --reload --host localhost --port 5000
+```
+The backend server will start running on `http://localhost:5000`
+
+### Frontend Client
+
+1. Navigate to the frontend directory:
+```bash
+cd frontend
+```
+
+2. Start the development server:
+```bash
 npm run dev
-
-# build for production with minification
-npm run build
-
-# run unit tests
-npm run unit
-
-# run e2e tests
-npm run e2e
-
-# run all tests
-npm test
 ```
+The frontend application will start running on `http://localhost:8080`
 
-# Docker
+## Development
 
-run the prebuilt docker image:
+- Backend API documentation is available at `http://localhost:5000/api/docs`
+- Frontend development server includes hot-reloading for instant feedback
+- Backend server will automatically reload when changes are detected using uvicorn
 
-``` bash
-docker run -p 8080:8080 -d ghcr.io/ardupilot/uavlogviewer:latest
+## Contributing
 
-```
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-or build the docker file locally:
 
-``` bash
 
-# Build Docker Image
-docker build -t <your username>/uavlogviewer .
 
-# Run Docker Image
-docker run -e VUE_APP_CESIUM_TOKEN=<Your cesium ion token> -it -p 8080:8080 -v ${PWD}:/usr/src/app <your username>/uavlogviewer
-
-# Navigate to localhost:8080 in your web browser
-
-# changes should automatically be applied to the viewer
-
-```
