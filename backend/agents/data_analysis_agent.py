@@ -1,11 +1,14 @@
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
 from tools.flight_data_db import FlightDataDB
+from tools.sql_tools import SQLTools
 import pandas as pd
-from pydantic import BaseModel
+from models import Message, FlightData, AgentResponse
+from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam
 
 # Configure logging
 logging.basicConfig(
@@ -21,20 +24,9 @@ load_dotenv()
 
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-class Message(BaseModel):
-    role: str
-    content: str
-
-class FlightData(BaseModel):
-    data: Dict[str, Any]
-
-class AgentResponse(BaseModel):
-    message: str
-    sessionId: str
-    error: Optional[str] = None
-
 class DataExtractionAgent:
     def __init__(self):
+        self.sql_tools = SQLTools()
         self.system_prompt = """You are a data extraction expert for UAV flight data analysis. Your role is to generate SQL queries that extract relevant data for analysis.
         
         Guidelines:
@@ -64,31 +56,7 @@ class DataExtractionAgent:
         ORDER BY p.time_boot_ms;
         """
 
-    def _validate_query(self, query: str) -> bool:
-        """Validate that the query is safe to execute (read-only)."""
-        logger.debug(f"Starting query validation for: {query}")
-        query = query.lower().strip()
-        forbidden_keywords = ['insert', 'update', 'delete', 'drop', 'alter', 'create', 'truncate']
-        
-        # Log each forbidden keyword check
-        for keyword in forbidden_keywords:
-            if keyword in query:
-                logger.warning(f"Query validation failed: Found forbidden keyword '{keyword}'")
-                return False
-        
-        logger.debug("Query validation passed: No forbidden keywords found")
-        return True
-
-    def _extract_sql_query(self, query: str) -> str:
-        """Extract the SQL query from the generated query."""
-        logger.debug(f"Extracting SQL query from: {query}")
-        if "```sql" in query:
-            return query.split("```sql")[1].split("```")[0].strip()
-        else:
-            return ""
-
-    # TODO: Move DataExtractionAgent upwards in the agent hierarchy to be the first agent to be called 
-    def extract_data(self,query: str, flight_db: FlightDataDB, session_id: str):
+    def extract_data(self, query: str, flight_db: FlightDataDB, session_id: str, conversation_history: List[Message]) -> Tuple[pd.DataFrame, str]:
 
         """Extracts relevant data from the database for analysis based on the user's query.
         
@@ -96,9 +64,11 @@ class DataExtractionAgent:
             query (str): The user's query describing what data they want to analyze
             flight_db (FlightDataDB): The FlightDataDB instance to query
             session_id (str): The session ID to use for database access
-            
+            conversation_history (List[Message]): The conversation history to use for the SQL query generation
         Returns:
             pd.DataFrame: A DataFrame containing the extracted data ready for analysis
+            str: The SQL query used to extract the data
+
         """
         
         try:
@@ -106,38 +76,13 @@ class DataExtractionAgent:
             db_schema = flight_db.get_database_information(session_id)
             logger.info(f"Extracting data")
 
-            # Generate SQL query
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "system", "content": f"Available tables and their schemas:\n{db_schema}"},
-                {"role": "user", "content": f"Generate a SQL query to extract data for analysis based on this request: {query}"}
-            ]
-            
-            response = client.chat.completions.create(
-                model="gpt-4",
-                messages=messages,
-                temperature=0.3,
-                max_tokens=500
-            )
-            
-            generated_sql_query = response.choices[0].message.content.strip()
-            sql_query = self._extract_sql_query(generated_sql_query)
-            
-            # Validate query with retries
-            RETRY_LIMIT = 3
-            retry_count = 0
-            while not self._validate_query(sql_query):
-                logger.warning(f"Invalid query generated (attempt {retry_count + 1}/{RETRY_LIMIT}): {sql_query}")
-                conversation_history.append(Message(role="assistant", content=f"Error: Generated query contains forbidden operations. Only SELECT queries are allowed. Please try again."))
-                sql_query = self._generate_sql_query(question, schema, conversation_history)
-                retry_count += 1
-                if retry_count >= RETRY_LIMIT:
-                    logger.error("Failed to generate valid query after maximum retries")
-                    raise Exception("Failed to generate valid query after maximum retries")
+            user_prompt = f"Generate a SQL query to extract data for analysis based on this request: {query}"
+
+            sql_query = self.sql_tools.generate_sql_query(self.system_prompt, user_prompt, query, db_schema, conversation_history)
 
             # Execute query and return DataFrame
             result_df = flight_db.query(session_id, sql_query)
-            return result_df, sql_query
+            return (result_df, sql_query)
             
         except Exception as e:
             logger.error(f"Error in DataExtractionAgent: {str(e)}")
@@ -157,7 +102,7 @@ class CodeGenerationAgent:
         logger.info(f"Extracted code: {text[start:end].strip()}")
         return text[start:end].strip()
 
-    def generate_code(self, query: str, df: pd.DataFrame):
+    def generate_code(self, query: str, df: pd.DataFrame) -> str:
         """Uses the code generation tool and gets code from the LLM for the user's query."""
         cols = df.columns.tolist()
         
@@ -173,9 +118,9 @@ class CodeGenerationAgent:
         3. Wrap the snippet in a single ```python code fence (no extra prose).
         """
 
-        messages = [
-            {"role": "system", "content": "You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal scikit-learn operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis."},
-            {"role": "user", "content": prompt}
+        messages: List[ChatCompletionMessageParam] = [
+            ChatCompletionSystemMessageParam(role="system", content="You are a Python data-analysis expert who writes clean, efficient code. Solve the given problem with optimal scikit-learn operations. Be concise and focused. Your response must contain ONLY a properly-closed ```python code block with no explanations before or after. Ensure your solution is correct, handles edge cases, and follows best practices for data analysis."),
+            ChatCompletionUserMessageParam(role="user", content=prompt)
         ]
 
         response = client.chat.completions.create(
@@ -186,10 +131,12 @@ class CodeGenerationAgent:
         )
 
         full_response = response.choices[0].message.content
+        if full_response is None:
+            raise Exception("No content received from OpenAI API")
         code = self._extract_first_code_block(full_response)
-        return code, ""
+        return code
         
-    def execute_code(self, code: str, df: pd.DataFrame):
+    def execute_code(self, code: str, df: pd.DataFrame) -> Any:
         """Executes the generated code in a controlled environment and returns the result or error message."""
         import numpy as np
         import pandas as pd
@@ -257,14 +204,17 @@ class ReasoningAgent:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are an expert UAV flight data analyst with deep knowledge of flight dynamics, performance metrics, and operational insights."},
-                {"role": "user", "content": prompt}
+                ChatCompletionSystemMessageParam(role="system", content="You are an expert UAV flight data analyst with deep knowledge of flight dynamics, performance metrics, and operational insights."),
+                ChatCompletionUserMessageParam(role="user", content=prompt)
             ],
             temperature=0.4,
             max_tokens=1024
         )
 
-        return response.choices[0].message.content.strip()
+        response_content = response.choices[0].message.content
+        if response_content is None:
+            raise Exception("No content received from OpenAI API")
+        return response_content.strip()
 
 class DataAnalysisAgent:
     def __init__(self):
@@ -272,10 +222,10 @@ class DataAnalysisAgent:
         self.code_generation_agent = CodeGenerationAgent()
         self.reasoning_agent = ReasoningAgent()
 
-    def analyze(self, query: str, flight_db: FlightDataDB, session_id: str):
+    def analyze(self, query: str, flight_db: FlightDataDB, session_id: str, conversation_history: List[Message]):
         """Analyzes the data and returns the result."""
-        df, sql_query = self.data_extraction_agent.extract_data(query, flight_db, session_id)
-        code, _ = self.code_generation_agent.generate_code(query, df)
+        df, sql_query = self.data_extraction_agent.extract_data(query, flight_db, session_id, conversation_history)
+        code = self.code_generation_agent.generate_code(query, df)
         result = self.code_generation_agent.execute_code(code, df)
 
         response = self.reasoning_agent.reasoning(query, result, code, sql_query)
