@@ -72,6 +72,9 @@ Added new endpoints:
 - Session-based conversation management
 - Secure API key handling through environment variables
 
+### Flow Diagram
+![Maverick Design Flow Diagram](https://github.com/parthskansara/UAVLogViewer/blob/master/Flow%20Diagram.png)
+
 ## Prerequisites
 
 - Node.js (v14 or higher)
