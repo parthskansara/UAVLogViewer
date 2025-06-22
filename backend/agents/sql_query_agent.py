@@ -145,6 +145,7 @@ class SQLQueryAgent:
                     - Ask about specific flight parameters (eg: altitude, speed, battery, etc.)
                     - Request analysis of flight data
                     - Ask for statistics or trends in the data
+                    - Ask for specific events or parameters like when did the altitude cross a certain value, or when did the velocity exceed a certain value
                     - Compare different flight parameters
                     - If flight period is not specified, assume the entire flight duration
 
@@ -154,10 +155,15 @@ class SQLQueryAgent:
                     - "Would you like to see the data aggregated or as a time series?"
                     - "What specific flight parameters would you like to analyze?"
 
+
                     Examples of questions that do not need clarification:
                     - Q: "What is the total flight duration?"
                       A: null (No clarification needed; assume entire flight duration)
                     - Q: "Show me the average altitude."
+                      A: null (No clarification needed; assume entire flight duration)
+                    - Q: "When did the altitude cross 100 meters?"
+                      A: null (No clarification needed; assume entire flight duration)
+                    - Q: "When did the velocity exceed 10 m/s?"
                       A: null (No clarification needed; assume entire flight duration)
 
                     If a question asks about a parameter that is not in the database schema, return "This parameter is not in the flight data, please ask a different question."

@@ -32,7 +32,8 @@ class QueryClassifierAgent:
         
         Guidelines:
         1. Classify as SQL if the query:
-           - Asks for specific data points
+           - Asks for specific data points like the current position, velocity, or attitude
+           - Asks for specific events or parameters like when did the altitude cross a certain value, or when did the velocity exceed a certain value
            - Requests simple aggregations (count, sum, avg)
            - Asks about specific events or parameters
            - Requires basic filtering or sorting
