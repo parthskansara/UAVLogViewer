@@ -54,6 +54,14 @@ class ChatResponse(BaseModel):
 async def index():
     return {"message": "Server is running"}
 
+# @app.get("/data")
+# async def check_data ():
+#     try:
+#         df = flight_db.query("11dda614-2bd7-40a1-bd42-93034105a0e9", "SELECT * FROM AHRS3")
+#         return {"message": "Data is available", "data": df.to_dict(orient="records")}
+#     except Exception as e:
+#         return {"message": "Data is not available", "error": str(e)}
+
 @app.get("/api/docs", response_model=Dict[str, Any])
 async def get_api_docs():
     """Return API documentation and available endpoints."""

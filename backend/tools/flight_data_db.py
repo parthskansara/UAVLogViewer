@@ -80,18 +80,84 @@ class FlightDataDB:
             elif isinstance(sample, bool):
                 return "BOOLEAN"
             elif isinstance(sample, list):
-                # Special handling for time_unix_usec which comes as a list of arrays
-                if len(sample) > 0 and isinstance(sample[0], list) and len(sample[0]) > 0:
-                    # If it's a list of arrays, use the first element of the first array
-                    return "BIGINT"
-                # Convert other lists to JSON strings for storage
-                return "VARCHAR"
+                # If it's a list, we need to determine what type it should be
+                if len(sample) == 0:
+                    return "VARCHAR"  # Empty list as JSON string
+                
+                # Check if it's a list of arrays (like time_unix_usec)
+                if isinstance(sample[0], list) and len(sample[0]) > 0:
+                    first_element = sample[0][0]
+                    if isinstance(first_element, (int, float)):
+                        return "BIGINT"
+                    else:
+                        return "VARCHAR"
+                
+                # Check if it's a simple list with consistent types
+                if all(isinstance(item, (int, float)) for item in sample):
+                    return "BIGINT"  # Assume first element type
+                elif all(isinstance(item, str) for item in sample):
+                    return "VARCHAR"
+                else:
+                    # Mixed types or complex structures, store as JSON
+                    return "VARCHAR"
             else:
                 logger.warning(f"Unknown type for sample value: {type(sample)}, defaulting to VARCHAR")
                 return "VARCHAR"
         except Exception as e:
             logger.error(f"Error inferring DuckDB type: {str(e)}")
             raise DataValidationError(f"Failed to infer data type: {str(e)}")
+
+    def _process_field_value(self, value: Any, field: str, msg_name: str) -> Any:
+        """
+        Processes a field value to ensure it's in the correct format for database storage.
+        
+        Args:
+            value (Any): The raw value to process
+            field (str): The field name for context
+            msg_name (str): The message name for context
+            
+        Returns:
+            Any: The processed value ready for database insertion
+        """
+        try:
+            if value is None:
+                return None
+                
+            if isinstance(value, list):
+                # Handle empty lists
+                if len(value) == 0:
+                    return None
+                
+                # Special handling for time_unix_usec which comes as a list of arrays
+                if field == "time_unix_usec" and len(value) > 0 and isinstance(value[0], list):
+                    if not value[0] or not isinstance(value[0][0], (int, float)):
+                        raise DataValidationError(
+                            f"Invalid time_unix_usec format in message {msg_name}: expected list of numeric arrays"
+                        )
+                    return value[0][0]  # Take the first element of the first array
+                
+                # Handle lists that should be converted to single values
+                if len(value) == 1 and isinstance(value[0], (int, float, str, bool)):
+                    return value[0]
+                
+                # For other lists, convert to JSON string
+                try:
+                    return json.dumps(value)
+                except (TypeError, ValueError) as e:
+                    raise DataValidationError(
+                        f"Failed to serialize list data for field '{field}' in message {msg_name}: {str(e)}"
+                    )
+            
+            # For non-list values, return as-is if they're valid types
+            if isinstance(value, (int, float, str, bool)):
+                return value
+            
+            # For any other type, try to convert to string
+            return str(value)
+            
+        except Exception as e:
+            logger.error(f"Error processing field value for {field} in {msg_name}: {str(e)}")
+            raise DataValidationError(f"Failed to process field value: {str(e)}")
 
     def _create_table_for_message(self, session_id: str, msg_name: str, fields: List[str], sample_row: Dict[str, Any]) -> None:
         """
@@ -219,23 +285,9 @@ class FlightDataDB:
                                             f"Invalid data type for field '{field}' in message {msg_name}: {type(value)}"
                                         )
                                     
-                                    # Convert lists to JSON strings
-                                    if isinstance(value, list):
-                                        # Special handling for time_unix_usec which comes as a list of arrays
-                                        if field == "time_unix_usec" and len(value) > 0 and isinstance(value[0], list):
-                                            if not value[0] or not isinstance(value[0][0], (int, float)):
-                                                raise DataValidationError(
-                                                    f"Invalid time_unix_usec format in message {msg_name}: expected list of numeric arrays"
-                                                )
-                                            value = value[0][0]  # Take the first element of the first array
-                                        else:
-                                            try:
-                                                value = json.dumps(value)
-                                            except (TypeError, ValueError) as e:
-                                                raise DataValidationError(
-                                                    f"Failed to serialize list data for field '{field}' in message {msg_name}: {str(e)}"
-                                                )
-                                    row[field] = value
+                                    # Process the value using the new method
+                                    processed_value = self._process_field_value(value, field, msg_name)
+                                    row[field] = processed_value
                             rows.append(row)
                         except IndexError as e:
                             raise DataValidationError(
@@ -299,7 +351,7 @@ class FlightDataDB:
             logger.error(f"Error executing query: {str(e)}")
             raise FlightDataDBError(f"Query execution failed: {str(e)}")
 
-    def get_database_information(self, session_id: str) -> Dict[str, Dict[str, Any]]:
+    def  get_database_information(self, session_id: str) -> Dict[str, Dict[str, Any]]:
         """
         Gets the database information for a given session.
 
@@ -333,3 +385,203 @@ class FlightDataDB:
         except Exception as e:
             logger.error(f"Error during database cleanup: {str(e)}")
             raise FlightDataDBError(f"Failed to close database connections: {str(e)}")
+
+    def _validate_and_clean_data(self, session_id: str, msg_name: str, fields: List[str], rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Validates and cleans data to ensure compatibility with the database schema.
+        
+        Args:
+            session_id (str): The session ID
+            msg_name (str): The message name
+            fields (List[str]): The field names
+            rows (List[Dict[str, Any]]): The rows to validate and clean
+            
+        Returns:
+            List[Dict[str, Any]]: The cleaned rows
+        """
+        try:
+            if not rows:
+                return rows
+                
+            # Get the table schema to understand expected types
+            conn = self._get_connection(session_id)
+            schema_query = f"PRAGMA table_info('{msg_name}')"
+            schema_df = conn.execute(schema_query).fetchdf()
+            
+            # Create a mapping of field names to their expected types
+            field_types = {}
+            for _, row in schema_df.iterrows():
+                field_name = str(row['name'])
+                field_type = str(row['type']).upper()
+                field_types[field_name] = field_type
+            
+            cleaned_rows = []
+            for row in rows:
+                cleaned_row = {}
+                for field in fields:
+                    value = row.get(field)
+                    
+                    if field in field_types:
+                        expected_type = field_types[field]
+                        
+                        # Handle type conversion based on expected type
+                        if expected_type in ('BIGINT', 'INTEGER'):
+                            if isinstance(value, str) and value.startswith('[') and value.endswith(']'):
+                                # This is a JSON string that should be a number
+                                try:
+                                    parsed = json.loads(value)
+                                    if isinstance(parsed, list) and len(parsed) > 0:
+                                        if isinstance(parsed[0], list) and len(parsed[0]) > 0:
+                                            value = parsed[0][0]  # Take first element of first array
+                                        else:
+                                            value = parsed[0]  # Take first element
+                                except (json.JSONDecodeError, IndexError, TypeError):
+                                    logger.warning(f"Could not parse JSON string for field {field}: {value}")
+                                    value = None
+                        
+                        # Ensure the value is the correct type
+                        if expected_type in ('BIGINT', 'INTEGER') and value is not None:
+                            try:
+                                if isinstance(value, (int, float, str)):
+                                    value = int(float(value))
+                                else:
+                                    value = None
+                            except (ValueError, TypeError):
+                                logger.warning(f"Could not convert {value} to integer for field {field}")
+                                value = None
+                        elif expected_type == 'DOUBLE' and value is not None:
+                            try:
+                                if isinstance(value, (int, float, str)):
+                                    value = float(value)
+                                else:
+                                    value = None
+                            except (ValueError, TypeError):
+                                logger.warning(f"Could not convert {value} to float for field {field}")
+                                value = None
+                    
+                    cleaned_row[field] = value
+                
+                cleaned_rows.append(cleaned_row)
+            
+            return cleaned_rows
+            
+        except Exception as e:
+            logger.error(f"Error validating and cleaning data for {msg_name}: {str(e)}")
+            # Return original rows if validation fails
+            return rows
+
+    def cleanup_existing_data(self, session_id: str) -> None:
+        """
+        Cleans up existing data in the database to fix type mismatches.
+        This is useful when existing data was stored with incorrect types.
+        
+        Args:
+            session_id (str): The session ID to clean up
+        """
+        try:
+            if session_id not in self.message_tables:
+                logger.info(f"No tables found for session {session_id}")
+                return
+                
+            conn = self._get_connection(session_id)
+            tables = list(self.message_tables[session_id])
+            
+            for table_name in tables:
+                try:
+                    logger.info(f"Cleaning up table: {table_name}")
+                    
+                    # Get all data from the table
+                    select_query = f'SELECT * FROM "{table_name}"'
+                    df = conn.execute(select_query).fetchdf()
+                    
+                    if df.empty:
+                        logger.info(f"Table {table_name} is empty, skipping cleanup")
+                        continue
+                    
+                    # Get table schema
+                    schema_query = f"PRAGMA table_info('{table_name}')"
+                    schema_df = conn.execute(schema_query).fetchdf()
+                    
+                    # Create a new table with correct types
+                    temp_table_name = f"{table_name}_temp"
+                    
+                    # Build new table schema
+                    columns = []
+                    for _, row in schema_df.iterrows():
+                        field_name = str(row['name'])
+                        field_type = str(row['type']).upper()
+                        
+                        # Ensure numeric fields are properly typed
+                        if field_type in ('BIGINT', 'INTEGER'):
+                            columns.append(f'"{field_name}" BIGINT')
+                        elif field_type == 'DOUBLE':
+                            columns.append(f'"{field_name}" DOUBLE')
+                        else:
+                            columns.append(f'"{field_name}" {field_type}')
+                    
+                    # Create temporary table
+                    create_temp_sql = f'CREATE TABLE "{temp_table_name}" ({", ".join(columns)})'
+                    conn.execute(create_temp_sql)
+                    
+                    # Clean and insert data
+                    cleaned_rows = []
+                    for _, row in df.iterrows():
+                        cleaned_row = {}
+                        for field_name in df.columns:
+                            value = row[field_name]
+                            
+                            # Find the expected type for this field
+                            field_type = None
+                            for _, schema_row in schema_df.iterrows():
+                                if str(schema_row['name']) == field_name:
+                                    field_type = str(schema_row['type']).upper()
+                                    break
+                            
+                            if field_type in ('BIGINT', 'INTEGER'):
+                                if isinstance(value, str) and value.startswith('[') and value.endswith(']'):
+                                    try:
+                                        parsed = json.loads(value)
+                                        if isinstance(parsed, list) and len(parsed) > 0:
+                                            if isinstance(parsed[0], list) and len(parsed[0]) > 0:
+                                                value = parsed[0][0]
+                                            else:
+                                                value = parsed[0]
+                                    except (json.JSONDecodeError, IndexError, TypeError):
+                                        value = None
+                                
+                                if value is not None:
+                                    try:
+                                        value = int(float(str(value)))
+                                    except (ValueError, TypeError):
+                                        value = None
+                            
+                            cleaned_row[field_name] = value
+                        
+                        cleaned_rows.append(cleaned_row)
+                    
+                    # Insert cleaned data into temporary table
+                    if cleaned_rows:
+                        insert_fields = list(cleaned_rows[0].keys())
+                        placeholders = ", ".join(["?"] * len(insert_fields))
+                        insert_sql = f'INSERT INTO "{temp_table_name}" ({", ".join(insert_fields)}) VALUES ({placeholders})'
+                        
+                        for cleaned_row in cleaned_rows:
+                            values = [cleaned_row.get(f) for f in insert_fields]
+                            conn.execute(insert_sql, values)
+                    
+                    # Replace original table with cleaned table
+                    conn.execute(f'DROP TABLE "{table_name}"')
+                    conn.execute(f'ALTER TABLE "{temp_table_name}" RENAME TO "{table_name}"')
+                    
+                    logger.info(f"Successfully cleaned up table {table_name}")
+                    
+                except Exception as e:
+                    logger.error(f"Error cleaning up table {table_name}: {str(e)}")
+                    # Continue with other tables
+                    continue
+            
+            logger.info(f"Completed cleanup for session {session_id}")
+            
+        except Exception as e:
+            logger.error(f"Error during data cleanup: {str(e)}")
+            raise FlightDataDBError(f"Failed to cleanup existing data: {str(e)}")

@@ -219,7 +219,7 @@ class SQLQueryAgent:
             # Execute query
             logger.info(f"Executing SQL query: {sql_query}")
             query_results = flight_db.query(session_id, sql_query)
-            logger.debug(f"Query execution completed. Results type: {type(query_results)}")
+            logger.debug(f"Query execution completed. Results: {query_results}")
             
             # Generate answer
             answer = self._generate_answer(question, query_results, conversation_history, schema)
